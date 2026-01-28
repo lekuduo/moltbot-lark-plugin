@@ -100,6 +100,7 @@ const debouncers = new Map<string, any>();
 const accountStates = new Map<string, AccountRuntimeState>();
 const processedMessages = new Map<string, number>();
 const userNameCache = new Map<string, { name: string; expiry: number }>();
+const botOpenIdCache = new Map<string, string>(); // 缓存机器人自己的 open_id
 
 function getAccountState(accountId: string): AccountRuntimeState {
   let state = accountStates.get(accountId);
@@ -558,6 +559,30 @@ function isDuplicateMessage(messageId: string): boolean {
 // User Info
 // ============================================================================
 
+/**
+ * 获取机器人自己的 open_id
+ */
+async function getBotOpenId(
+  client: lark.Client,
+  accountId: string
+): Promise<string> {
+  const cached = botOpenIdCache.get(accountId);
+  if (cached) {
+    return cached;
+  }
+
+  try {
+    const response = await (client as any).bot.info();
+    const botOpenId = response.data?.bot?.open_id || "";
+    if (botOpenId) {
+      botOpenIdCache.set(accountId, botOpenId);
+    }
+    return botOpenId;
+  } catch {
+    return "";
+  }
+}
+
 async function getUserName(
   client: lark.Client,
   userId: string
@@ -621,14 +646,22 @@ async function processMessage(params: {
     const requireMention = groupConfig.requireMention !== false;
 
     if (requireMention) {
-      const mentions = messageData.mentions || [];
-      const isMentioned = mentions.some((m: any) =>
-        m.id?.open_id || m.key === "@_all"
-      );
-      const textMentionsBot = /@_user_\d+/.test(text);
+      // 获取机器人自己的 open_id
+      const botOpenId = await getBotOpenId(client, accountId);
 
-      if (!isMentioned && !textMentionsBot) {
-        return; // 群聊无 @提及，忽略
+      const mentions = messageData.mentions || [];
+      // 检查是否 @了机器人自己，而不是任意 @
+      const isMentionedBot = mentions.some((m: any) => {
+        const mentionOpenId = m.id?.open_id;
+        // 如果有 botOpenId，精确匹配；否则检查是否 @all
+        if (botOpenId && mentionOpenId) {
+          return mentionOpenId === botOpenId;
+        }
+        return m.key === "@_all";
+      });
+
+      if (!isMentionedBot) {
+        return; // 群聊未 @机器人，忽略
       }
 
       // 移除 @提及文本
