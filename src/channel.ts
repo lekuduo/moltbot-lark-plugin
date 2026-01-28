@@ -572,13 +572,21 @@ async function getBotOpenId(
   }
 
   try {
-    const response = await (client as any).bot.info();
-    const botOpenId = response.data?.bot?.open_id || "";
+    // 使用正确的 API 获取机器人信息
+    const response = await (client as any).request({
+      method: 'GET',
+      url: '/open-apis/bot/v3/info/',
+    });
+    // 飞书 API 响应结构: { code: 0, msg: "ok", bot: { open_id: "ou_xxx", ... } }
+    const botOpenId = response?.bot?.open_id || "";
+    console.log(`[lark:${accountId}] Got bot info response:`, JSON.stringify(response));
+    console.log(`[lark:${accountId}] Got bot open_id: ${botOpenId}`);
     if (botOpenId) {
       botOpenIdCache.set(accountId, botOpenId);
     }
     return botOpenId;
-  } catch {
+  } catch (err: any) {
+    console.error(`[lark:${accountId}] Failed to get bot info:`, err.message, err);
     return "";
   }
 }
