@@ -74,16 +74,6 @@ moltbot gateway stop && moltbot gateway
 
 ### 高级配置
 
-#### CLI 模式 vs API 模式
-
-**CLI 模式问题**：使用 `claude-cli/*` 时可能遇到 "Session ID already in use" 错误。
-
-原因：Claude CLI 有账户级别的 session 锁机制，如果终端已运行 Claude CLI，Gateway 复用相同 session ID 会冲突。
-
-解决方案：
-- **方案 A（推荐）**：改用 API 模式（如 `anthropic/claude-*` 或第三方代理）
-- **方案 B**：确保终端没有运行其他 Claude CLI 实例
-
 #### 使用第三方 API 代理
 
 如果需要使用第三方 API 代理服务，在 `moltbot.json` 中配置：
@@ -101,11 +91,7 @@ moltbot gateway stop && moltbot gateway
 }
 ```
 
-#### 禁用工具调用（仅第三方代理）
-
-某些第三方 API 代理可能不完全支持工具调用，导致 `server_tool_use` 错误。这是因为代理检测到 system prompt 中的工具定义后在服务端处理，返回格式不兼容。
-
-添加以下配置禁用问题工具：
+某些第三方代理可能不完全支持工具调用，导致 `server_tool_use` 错误。添加以下配置禁用问题工具：
 
 ```json
 {
@@ -121,7 +107,6 @@ moltbot gateway stop && moltbot gateway
 |------|------|
 | 连接失败 | 检查 App ID/Secret，确认长连接已启用 |
 | 收不到消息 | 确认已订阅 `im.message.receive_v1` 事件 |
-| Session ID already in use | 关闭终端中的 Claude CLI，或改用 API 模式 |
 | `server_tool_use` 错误 | 在 `tools.deny` 中禁用 `web_search` 和 `web_fetch` |
 | 查看日志 | `tail -f ~/.moltbot/gateway.log` |
 
@@ -189,16 +174,6 @@ moltbot gateway stop && moltbot gateway
 
 ### Advanced Configuration
 
-#### CLI Mode vs API Mode
-
-**CLI Mode Issue**: Using `claude-cli/*` may cause "Session ID already in use" error.
-
-Reason: Claude CLI has account-level session locking. If Claude CLI is already running in terminal, Gateway reusing the same session ID will conflict.
-
-Solutions:
-- **Option A (Recommended)**: Switch to API mode (e.g., `anthropic/claude-*` or third-party proxy)
-- **Option B**: Ensure no other Claude CLI instances are running
-
 #### Using Third-party API Proxy
 
 If you need to use a third-party API proxy service, configure in `moltbot.json`:
@@ -216,11 +191,7 @@ If you need to use a third-party API proxy service, configure in `moltbot.json`:
 }
 ```
 
-#### Disable Tool Calling (Third-party Proxy Only)
-
-Some third-party API proxies may not fully support tool calling, causing `server_tool_use` errors. This happens when the proxy detects tool definitions in system prompt and handles them server-side, returning incompatible format.
-
-Add this config to disable problematic tools:
+Some third-party proxies may not fully support tool calling, causing `server_tool_use` errors. Add this config to disable problematic tools:
 
 ```json
 {
@@ -236,7 +207,6 @@ Add this config to disable problematic tools:
 |-------|----------|
 | Connection failed | Check App ID/Secret, ensure long connection enabled |
 | No messages | Verify `im.message.receive_v1` event subscription |
-| Session ID already in use | Close Claude CLI in terminal, or switch to API mode |
 | `server_tool_use` error | Disable `web_search` and `web_fetch` in `tools.deny` |
 | View logs | `tail -f ~/.moltbot/gateway.log` |
 
