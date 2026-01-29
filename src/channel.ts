@@ -18,6 +18,10 @@ import type { ChannelPlugin, MoltbotConfig, PluginRuntime } from "moltbot/plugin
 import { getChatChannelMeta } from "moltbot/plugin-sdk";
 import * as lark from "@larksuiteoapi/node-sdk";
 import { getLarkRuntime } from "./runtime.js";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import * as crypto from "node:crypto";
 
 // ============================================================================
 // Constants
@@ -28,6 +32,7 @@ const MESSAGE_DEDUP_TTL = 60_000; // 60秒消息去重窗口
 const MAX_TEXT_LENGTH = 4000; // 飞书文本消息最大长度
 const MAX_RETRY_ATTEMPTS = 3; // 最大重试次数
 const RETRY_DELAY_MS = 1000; // 重试延迟
+const SUPPORTED_IMAGE_TYPES = ["image"]; // 支持的图片消息类型
 
 // ============================================================================
 // Types
@@ -378,6 +383,83 @@ async function withRetry<T>(
   throw lastError;
 }
 
+/**
+ * 下载飞书图片消息
+ * 返回 base64 编码的图片数据
+ */
+async function downloadImage(
+  client: lark.Client,
+  messageId: string,
+  fileKey: string,
+  accountId: string
+): Promise<{ base64: string; mimeType: string } | null> {
+  try {
+    console.log(`[lark:${accountId}] Downloading image: messageId=${messageId}, fileKey=${fileKey}`);
+
+    const response = await withRetry(() =>
+      client.im.messageResource.get({
+        path: {
+          message_id: messageId,
+          file_key: fileKey,
+        },
+        params: {
+          type: "image",
+        },
+      })
+    );
+
+    if (!response) {
+      console.error(`[lark:${accountId}] Empty response when downloading image`);
+      return null;
+    }
+
+    // 飞书 SDK 返回的是特殊对象，有 getReadableStream 方法
+    let buffer: Buffer;
+
+    if (typeof (response as any).getReadableStream === 'function') {
+      // 使用 getReadableStream 获取流
+      const readableStream = (response as any).getReadableStream();
+      const chunks: Buffer[] = [];
+      for await (const chunk of readableStream) {
+        chunks.push(Buffer.from(chunk));
+      }
+      buffer = Buffer.concat(chunks);
+    } else if (Buffer.isBuffer(response)) {
+      buffer = response;
+    } else if ((response as any)?.data && Buffer.isBuffer((response as any).data)) {
+      buffer = (response as any).data;
+    } else {
+      console.error(`[lark:${accountId}] Unknown response type:`, typeof response, Object.keys(response || {}).join(', '));
+      return null;
+    }
+
+    if (buffer.length === 0) {
+      console.error(`[lark:${accountId}] Downloaded image is empty`);
+      return null;
+    }
+
+    // 检测图片类型
+    let mimeType = "image/png";
+    if (buffer[0] === 0xFF && buffer[1] === 0xD8) {
+      mimeType = "image/jpeg";
+    } else if (buffer[0] === 0x89 && buffer[1] === 0x50) {
+      mimeType = "image/png";
+    } else if (buffer[0] === 0x47 && buffer[1] === 0x49) {
+      mimeType = "image/gif";
+    } else if (buffer[0] === 0x52 && buffer[1] === 0x49) {
+      mimeType = "image/webp";
+    }
+
+    const base64 = buffer.toString("base64");
+    console.log(`[lark:${accountId}] Downloaded image: ${buffer.length} bytes, type=${mimeType}`);
+
+    return { base64, mimeType };
+  } catch (err: any) {
+    console.error(`[lark:${accountId}] Failed to download image:`, err.message);
+    return null;
+  }
+}
+
 // ============================================================================
 // Message Sending
 // ============================================================================
@@ -617,6 +699,57 @@ async function getUserName(
   }
 }
 
+// 群成员缓存
+const chatMembersCache = new Map<string, { members: string; expiry: number }>();
+
+/**
+ * 获取群成员列表
+ * 返回格式化的成员列表字符串
+ */
+async function getChatMembers(
+  client: lark.Client,
+  chatId: string,
+  accountId: string
+): Promise<string> {
+  const cached = chatMembersCache.get(chatId);
+  if (cached && cached.expiry > Date.now()) {
+    return cached.members;
+  }
+
+  try {
+    const response = await client.im.chatMembers.get({
+      path: { chat_id: chatId },
+      params: { member_id_type: "open_id", page_size: 100 },
+    });
+
+    const items = response.data?.items || [];
+    const memberNames: string[] = [];
+
+    for (const item of items) {
+      const memberId = item.member_id || "";
+      if (memberId) {
+        const name = await getUserName(client, memberId);
+        memberNames.push(name);
+      }
+    }
+
+    const membersStr = memberNames.length > 0
+      ? memberNames.join(", ")
+      : "无法获取成员列表";
+
+    chatMembersCache.set(chatId, {
+      members: membersStr,
+      expiry: Date.now() + 300_000, // 5分钟缓存
+    });
+
+    console.log(`[lark:${accountId}] Chat members: ${membersStr}`);
+    return membersStr;
+  } catch (err: any) {
+    console.error(`[lark:${accountId}] Failed to get chat members:`, err.message);
+    return "无法获取成员列表";
+  }
+}
+
 // ============================================================================
 // Inbound Processing
 // ============================================================================
@@ -624,11 +757,12 @@ async function getUserName(
 async function processMessage(params: {
   data: any;
   combinedText: string;
+  imageAttachments?: Array<{ base64: string; mimeType: string }>;
   accountId: string;
   config: MoltbotConfig;
   runtime: any;
 }): Promise<void> {
-  const { data, combinedText, accountId, config } = params;
+  const { data, combinedText, imageAttachments, accountId, config } = params;
 
   const messageData = data?.message;
   const senderData = data?.sender;
@@ -636,7 +770,10 @@ async function processMessage(params: {
   if (!messageData || !senderData) return;
 
   const text = combinedText.trim();
-  if (!text) return;
+  const hasImages = imageAttachments && imageAttachments.length > 0;
+
+  // 如果既没有文本也没有图片，则忽略
+  if (!text && !hasImages) return;
 
   const chatType = messageData.chat_type === "p2p" ? "direct" : "channel";
   const senderId = senderData.sender_id?.open_id || "";
@@ -658,14 +795,24 @@ async function processMessage(params: {
       const botOpenId = await getBotOpenId(client, accountId);
 
       const mentions = messageData.mentions || [];
-      // 检查是否 @了机器人自己，而不是任意 @
+      console.log(`[lark:${accountId}] botOpenId=${botOpenId}, mentions=`, JSON.stringify(mentions.map((m: any) => ({ key: m.key, open_id: m.id?.open_id, name: m.name }))));
+
+      // 检查是否 @了机器人自己
       const isMentionedBot = mentions.some((m: any) => {
         const mentionOpenId = m.id?.open_id;
-        // 如果有 botOpenId，精确匹配；否则检查是否 @all
+        // @all 总是响应
+        if (m.key === "@_all") {
+          return true;
+        }
+        // 如果有 botOpenId，精确匹配
         if (botOpenId && mentionOpenId) {
           return mentionOpenId === botOpenId;
         }
-        return m.key === "@_all";
+        // 如果无法获取 botOpenId，回退到有任意 @mention 就响应
+        if (!botOpenId && mentionOpenId) {
+          return true;
+        }
+        return false;
       });
 
       if (!isMentionedBot) {
@@ -674,11 +821,12 @@ async function processMessage(params: {
 
       // 移除 @提及文本
       finalText = text.replace(/@_user_\d+\s*/g, "").trim();
-      if (!finalText) return;
+      // 如果只有图片没有文本，finalText 可能为空，但仍应处理
+      if (!finalText && !hasImages) return;
     }
   }
 
-  console.log(`[lark:${accountId}] Message from ${senderId}: ${finalText.substring(0, 50)}...`);
+  console.log(`[lark:${accountId}] Message from ${senderId}: ${finalText.substring(0, 50)}${hasImages ? ` [+${imageAttachments!.length} images]` : ""}...`);
 
   // 获取发送者名称
   const senderName = await getUserName(client, senderId);
@@ -733,13 +881,56 @@ async function processMessage(params: {
   const fromAddress = isGroupChat ? `lark:group:${chatId}` : `lark:${senderId}`;
   const toAddress = fromAddress;
 
+  // 获取群成员列表（仅群聊）
+  let membersInfo = "";
+  if (isGroupChat) {
+    const members = await getChatMembers(client, chatId, accountId);
+    membersInfo = `\n[群成员: ${members}]`;
+  }
+
   // 在消息中附加发送者信息，让 AI 能够识别用户身份
-  const bodyWithMeta = `${finalText}\n[sender: ${senderName} (${senderId})]`;
+  const bodyWithMeta = `${finalText || "[图片]"}\n[sender: ${senderName} (${senderId})]${membersInfo}\n[message_id: ${messageId}]`;
+
+  // 处理图片：保存到临时文件，使用 MediaPath/MediaPaths
+  let mediaPaths: string[] | undefined;
+  let mediaTypes: string[] | undefined;
+  let tempFiles: string[] = [];
+
+  if (hasImages) {
+    mediaPaths = [];
+    mediaTypes = [];
+
+    for (let i = 0; i < imageAttachments!.length; i++) {
+      const img = imageAttachments![i];
+      try {
+        // 生成临时文件路径
+        const ext = img.mimeType.split("/")[1] || "png";
+        const tempPath = path.join(os.tmpdir(), `lark-image-${crypto.randomUUID()}.${ext}`);
+
+        // 保存 base64 到文件
+        const buffer = Buffer.from(img.base64, "base64");
+        await fs.writeFile(tempPath, buffer);
+
+        mediaPaths.push(tempPath);
+        mediaTypes.push(img.mimeType);
+        tempFiles.push(tempPath);
+
+        console.log(`[lark:${accountId}] Saved image to temp file: ${tempPath}`);
+      } catch (err: any) {
+        console.error(`[lark:${accountId}] Failed to save image to temp file:`, err.message);
+      }
+    }
+
+    if (mediaPaths.length === 0) {
+      mediaPaths = undefined;
+      mediaTypes = undefined;
+    }
+  }
 
   const ctx = finalizeInboundContext({
     Body: bodyWithMeta,
-    RawBody: finalText,
-    CommandBody: finalText,
+    RawBody: finalText || "[图片]",
+    CommandBody: finalText || "",
     From: fromAddress,
     To: toAddress,
     SessionKey: sessionKey,
@@ -753,6 +944,13 @@ async function processMessage(params: {
     Timestamp: timestamp,
     OriginatingChannel: "lark",
     OriginatingTo: toAddress,
+    // 图片附件使用 MediaPath/MediaPaths 格式
+    MediaPath: mediaPaths?.[0],
+    MediaType: mediaTypes?.[0],
+    MediaUrl: mediaPaths?.[0],
+    MediaPaths: mediaPaths,
+    MediaTypes: mediaTypes,
+    MediaUrls: mediaPaths,
   });
 
   // 记录 session
@@ -826,6 +1024,11 @@ async function processMessage(params: {
   }
 
   markDispatchIdle();
+
+  // 注意：不在这里清理临时图片文件
+  // 因为 dispatchReplyFromConfig 是异步的，AI 可能还没读取完图片
+  // 临时文件会由系统自动清理（通常在重启后）
+  // 如果需要手动清理，可以定期清理 /tmp/lark-image-* 文件
 }
 
 // ============================================================================
@@ -945,6 +1148,10 @@ async function startProvider(params: {
       "im.message.receive_v1": async (data: any) => {
         state.lastInboundAt = Date.now();
 
+        // 调试：打印所有收到的消息类型
+        const messageType = data?.message?.message_type;
+        console.log(`[lark:${accountId}] Received message type: ${messageType}`);
+
         // 消息去重
         const messageId = data?.message?.message_id;
         if (messageId && isDuplicateMessage(messageId)) {
@@ -954,7 +1161,120 @@ async function startProvider(params: {
         // 忽略机器人自己的消息
         if (data?.sender?.sender_type === "app") return;
 
-        // 入队处理
+        // 图片消息：直接处理，不进入 debouncer
+        if (messageType === "image") {
+          try {
+            const account = resolveLarkAccount({ cfg: config, accountId });
+            const client = getLarkClient(account);
+
+            // 解析图片内容
+            const content = JSON.parse(data?.message?.content || "{}");
+            const imageKey = content.image_key;
+
+            if (imageKey) {
+              console.log(`[lark:${accountId}] Received image message: ${imageKey}`);
+
+              // 下载图片
+              const imageData = await downloadImage(client, messageId, imageKey, accountId);
+
+              if (imageData) {
+                await processMessage({
+                  data,
+                  combinedText: "",
+                  imageAttachments: [imageData],
+                  accountId,
+                  config,
+                  runtime: params.runtime,
+                });
+              } else {
+                console.error(`[lark:${accountId}] Failed to download image`);
+              }
+            }
+          } catch (err: any) {
+            console.error(`[lark:${accountId}] Image processing error:`, err.message);
+            state.errorCount++;
+          }
+          return;
+        }
+
+        // 富文本消息（post）：可能包含图片
+        if (messageType === "post") {
+          try {
+            const account = resolveLarkAccount({ cfg: config, accountId });
+            const client = getLarkClient(account);
+
+            // 解析富文本内容
+            const content = JSON.parse(data?.message?.content || "{}");
+            console.log(`[lark:${accountId}] Post content:`, JSON.stringify(content).substring(0, 500));
+
+            // 富文本结构可能是:
+            // 1. 直接: { "title": "", "content": [[...]] }
+            // 2. 或包装: { "zh_cn": { "title": "", "content": [[...]] } }
+            let postContent = content;
+            if (content.zh_cn) {
+              postContent = content.zh_cn;
+            } else if (content.en_us) {
+              postContent = content.en_us;
+            }
+
+            const contentBlocks = postContent?.content || [];
+
+            // 提取所有图片和文本
+            const imageKeys: string[] = [];
+            const textParts: string[] = [];
+
+            for (const block of contentBlocks) {
+              if (Array.isArray(block)) {
+                for (const element of block) {
+                  if (element.tag === "img" && element.image_key) {
+                    imageKeys.push(element.image_key);
+                  } else if (element.tag === "text" && element.text) {
+                    textParts.push(element.text);
+                  }
+                }
+              }
+            }
+
+            console.log(`[lark:${accountId}] Post parsed: images=${imageKeys.length}, texts=${textParts.length}`);
+
+            // 如果有图片，下载并处理
+            if (imageKeys.length > 0) {
+              const imageAttachments: Array<{ base64: string; mimeType: string }> = [];
+
+              for (const imageKey of imageKeys) {
+                console.log(`[lark:${accountId}] Downloading image from post: ${imageKey}`);
+                const imageData = await downloadImage(client, messageId, imageKey, accountId);
+                if (imageData) {
+                  imageAttachments.push(imageData);
+                }
+              }
+
+              if (imageAttachments.length > 0) {
+                await processMessage({
+                  data,
+                  combinedText: textParts.join(" "),
+                  imageAttachments,
+                  accountId,
+                  config,
+                  runtime: params.runtime,
+                });
+                return;
+              }
+            }
+
+            // 如果没有图片，作为普通富文本处理
+            if (textParts.length > 0) {
+              await debouncer.enqueue({ data });
+              return;
+            }
+          } catch (err: any) {
+            console.error(`[lark:${accountId}] Post processing error:`, err.message);
+            state.errorCount++;
+          }
+          return;
+        }
+
+        // 文本消息：入队处理（支持合并）
         try {
           await debouncer.enqueue({ data });
         } catch (err: any) {
@@ -1014,7 +1334,7 @@ async function probeAccount(
 const meta = getChatChannelMeta("lark", {
   label: "Lark (飞书)",
   shortLabel: "Lark",
-  docs: "https://docs.clawd.bot/channels/lark",
+  docs: "https://docs.moltbot.com/channels/lark",
   color: "#3370FF",
   icon: "lark",
 });
