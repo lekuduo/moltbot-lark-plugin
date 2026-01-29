@@ -9,6 +9,7 @@
 <p align="center">
   <img src="screenshots/demo1.png" width="400" alt="群聊效果">
   <img src="screenshots/demo2.png" width="400" alt="对话总结">
+  <img src="screenshots/demo3.png" width="400" alt="Markdown表格渲染">
 </p>
 
 ---
