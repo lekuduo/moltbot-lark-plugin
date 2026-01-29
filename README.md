@@ -21,6 +21,29 @@
 - 私聊 + 群聊（@提及触发）
 - 自动重试、消息去重、长消息分段
 - 用户身份识别（ID + 名称）
+- 图片消息支持（接收图片并传给 AI）
+- 群成员识别（AI 可知道群内所有成员）
+
+#### 接收（入站）
+
+| 类型 | 支持 | 说明 |
+|------|------|------|
+| 纯文本 | ✅ | 基础支持，支持消息合并（debounce） |
+| 图片消息 | ✅ | 自动下载并转为临时文件传给 AI |
+| 富文本 (post) | ✅ | 支持解析文本和图片 |
+| @提及检测 | ✅ | 群聊中精确匹配机器人 open_id |
+| 群成员识别 | ✅ | 群聊消息包含成员列表（5分钟缓存） |
+| 用户名识别 | ✅ | 显示发送者真实姓名（1小时缓存） |
+
+#### 发送（出站）
+
+| 类型 | 支持 | 说明 |
+|------|------|------|
+| 纯文本 | ✅ | 基础支持，超长自动分段（4000字符限制） |
+| 富文本 (post) | ✅ | 代码块自动转为富文本格式 |
+| 消息卡片 | ✅ | 可通过参数启用 `useCard` |
+| 图片 | ⚠️ | 仅支持发送链接，不支持上传图片 |
+| 表情回复 | ✅ | 收到消息自动添加 ✓ 表情 |
 
 ### 快速开始
 
@@ -36,7 +59,7 @@ cd lark && npm install
 
 在[飞书开发者后台](https://open.feishu.cn/)：
 - 创建企业应用，获取 App ID 和 App Secret
-- 权限：`im:message` `im:message.receive_v1`
+- 权限：`im:message` `im:message.receive_v1` `im:resource`（图片下载）`im:chat.members:read`（群成员）`contact:user.base:readonly`（用户名）
 - 事件订阅：启用长连接，添加 `im.message.receive_v1`
 
 **3. 配置 Moltbot**
@@ -121,6 +144,29 @@ moltbot gateway stop && moltbot gateway
 - DM + Group chat (with @mention trigger)
 - Auto-retry, deduplication, long message splitting
 - User identity (ID + name)
+- Image message support (receive and pass to AI)
+- Group member recognition (AI knows all members)
+
+#### Inbound (Receiving)
+
+| Type | Support | Notes |
+|------|---------|-------|
+| Plain text | ✅ | Basic support with message debouncing |
+| Image | ✅ | Auto-download and pass to AI as temp file |
+| Rich text (post) | ✅ | Parse text and images |
+| @mention detection | ✅ | Precise matching of bot's open_id |
+| Group members | ✅ | Include member list in group chats (5min cache) |
+| User names | ✅ | Show sender's real name (1hr cache) |
+
+#### Outbound (Sending)
+
+| Type | Support | Notes |
+|------|---------|-------|
+| Plain text | ✅ | Auto-split long messages (4000 char limit) |
+| Rich text (post) | ✅ | Code blocks auto-convert to rich text |
+| Message cards | ✅ | Enable with `useCard` parameter |
+| Image | ⚠️ | Link only, no direct upload |
+| Reactions | ✅ | Auto-add ✓ emoji on receive |
 
 ### Quick Start
 
@@ -136,7 +182,7 @@ cd lark && npm install
 
 In [Lark Developer Console](https://open.feishu.cn/):
 - Create enterprise app, get App ID and App Secret
-- Permissions: `im:message` `im:message.receive_v1`
+- Permissions: `im:message` `im:message.receive_v1` `im:resource` (image download) `im:chat.members:read` (group members) `contact:user.base:readonly` (user names)
 - Events: Enable long connection, add `im.message.receive_v1`
 
 **3. Configure Moltbot**
